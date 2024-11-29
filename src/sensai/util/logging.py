@@ -2,10 +2,11 @@ import atexit
 import logging as lg
 import sys
 import time
+from abc import ABC, abstractmethod
 from datetime import datetime
 from io import StringIO
 from logging import *
-from typing import List, Callable, Optional, TypeVar, TYPE_CHECKING
+from typing import List, Callable, Optional, TypeVar, TYPE_CHECKING, Generic
 
 from .time import format_duration
 
@@ -17,6 +18,7 @@ log = getLogger(__name__)
 
 LOG_DEFAULT_FORMAT = '%(levelname)-5s %(asctime)-15s %(name)s:%(funcName)s:%(lineno)d - %(message)s'
 T = TypeVar("T")
+THandler = TypeVar("THandler", bound=Handler)
 
 # Holds the log format that is configured by the user (using function `configure`), such
 # that it can be reused in other places
@@ -142,7 +144,6 @@ def datetime_tag() -> str:
 
 _fileLoggerPaths: List[str] = []
 _isAtExitReportFileLoggerRegistered = False
-_memoryLogStream: Optional[StringIO] = None
 
 
 def _at_exit_report_file_logger():
@@ -150,10 +151,11 @@ def _at_exit_report_file_logger():
         print(f"A log file was saved to {path}")
 
 
-def add_file_logger(path, register_atexit=True):
+def add_file_logger(path, append=True, register_atexit=True) -> FileHandler:
     global _isAtExitReportFileLoggerRegistered
     log.info(f"Logging to {path} ...")
-    handler = FileHandler(path)
+    mode = "a" if append else "w"
+    handler = FileHandler(path, mode=mode)
     handler.setFormatter(Formatter(_logFormat))
     Logger.root.addHandler(handler)
     _fileLoggerPaths.append(path)
@@ -163,22 +165,24 @@ def add_file_logger(path, register_atexit=True):
     return handler
 
 
-def add_memory_logger() -> None:
+class MemoryStreamHandler(StreamHandler):
+    def __init__(self, stream: StringIO):
+        super().__init__(stream)
+
+    def get_log(self) -> str:
+        stream: StringIO = self.stream
+        return stream.getvalue()
+
+
+def add_memory_logger() -> MemoryStreamHandler:
     """
-    Enables in-memory logging (if it is not already enabled), i.e. all log statements are written to a memory buffer and can later be
-    read via function `get_memory_log()`
+    Adds an in-memory logger, i.e. all log statements are written to a memory buffer which can be retrieved
+    using the handler's `get_log` method.
     """
-    global _memoryLogStream
-    if _memoryLogStream is not None:
-        return
-    _memoryLogStream = StringIO()
-    handler = StreamHandler(_memoryLogStream)
+    handler = MemoryStreamHandler(StringIO())
     handler.setFormatter(Formatter(_logFormat))
     Logger.root.addHandler(handler)
-
-
-def get_memory_log():
-    return _memoryLogStream.getvalue()
+    return handler
 
 
 class StopWatch:
@@ -334,27 +338,60 @@ class LogTime:
         return self
 
 
-class FileLoggerContext:
+class LoggerContext(Generic[THandler], ABC):
     """
-    A context handler to be used in conjunction with Python's `with` statement which enables file-based logging.
+    Base class for context handlers to be used in conjunction with Python's `with` statement.
     """
-    def __init__(self, path: str, enabled=True):
+
+    def __init__(self, enabled=True):
         """
-        :param path: the path to the log file
         :param enabled: whether to actually perform any logging.
             This switch allows the with statement to be applied regardless of whether logging shall be enabled.
         """
         self.enabled = enabled
-        self.path = path
         self._log_handler = None
 
-    def __enter__(self):
+    @abstractmethod
+    def _create_log_handler(self) -> THandler:
+        pass
+
+    def __enter__(self) -> Optional[THandler]:
         if self.enabled:
-            self._log_handler = add_file_logger(self.path, register_atexit=False)
+            self._log_handler = self._create_log_handler()
+        return self._log_handler
 
     def __exit__(self, exc_type, exc_value, traceback):
         if self._log_handler is not None:
             remove_log_handler(self._log_handler)
+
+
+class FileLoggerContext(LoggerContext[FileHandler]):
+    """
+    A context handler to be used in conjunction with Python's `with` statement which enables file-based logging.
+    """
+
+    def __init__(self, path: str, append=True, enabled=True):
+        """
+        :param path: the path to the log file
+        :param append: whether to append in case the file already exists; if False, always create a new file.
+        :param enabled: whether to actually perform any logging.
+            This switch allows the with statement to be applied regardless of whether logging shall be enabled.
+        """
+        self.path = path
+        self.append = append
+        super().__init__(enabled=enabled)
+
+    def _create_log_handler(self) -> FileHandler:
+        return add_file_logger(self.path, append=self.append, register_atexit=False)
+
+
+class MemoryLoggerContext(LoggerContext[MemoryStreamHandler]):
+    """
+    A context handler to be used in conjunction with Python's `with` statement which enables in-memory logging.
+    """
+
+    def _create_log_handler(self) -> MemoryStreamHandler:
+        return add_memory_logger()
 
 
 class LoggingDisabledContext:
