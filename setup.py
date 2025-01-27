@@ -54,11 +54,8 @@ setup(
     install_requires=relaxed_requirements_from_file("requirements.txt"),
     dependency_links=[],
     setup_requires=["wheel"],
-    author='appliedAI Institute gGmbh & jambit GmbH',
+    author='Dominik Jain et al.',
     classifiers=[
-        "Programming Language :: Python :: 3.7",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "License :: OSI Approved :: MIT License"
