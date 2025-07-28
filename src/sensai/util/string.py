@@ -516,3 +516,42 @@ class TagBuilder:
         :return: the string (with all components joined)
         """
         return self.glue.join(self.components)
+
+
+class TextBuilder:
+    def __init__(self, initial_text: str | None = None):
+        self._components = []
+        if initial_text is not None:
+            self._components.append(initial_text)
+
+    def build(self) -> str:
+        return "\n".join(self._components)
+
+    def with_lines(self, lines: Sequence[str], indent=0) -> "TextBuilder":
+        for line in lines:
+            line = line.rstrip()
+            if indent > 0:
+                line = " " * indent + line
+            self._components.append(line)
+        return self
+
+    def with_lines_from_text(self, text: str, indent=0) -> "TextBuilder":
+        lines = text.splitlines(keepends=False)
+        return self.with_lines(lines, indent=indent)
+
+    def with_line(self, line: str, indent=0) -> "TextBuilder":
+        return self.with_lines([line], indent=indent)
+
+    def with_line_conditional(self, cond: bool, line: str, indent=0) -> "TextBuilder":
+        if cond:
+            self.with_line(line, indent=indent)
+        return self
+
+    def with_text(self, text: str) -> "TextBuilder":
+        self._components.append(text)
+        return self
+
+    def with_break(self, n=1) -> "TextBuilder":
+        for i in range(n):
+            self._components.append("")
+        return self

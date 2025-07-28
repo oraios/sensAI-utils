@@ -1,6 +1,7 @@
+from .string import ToStringMixin
 
 
-class Version:
+class Version(ToStringMixin):
     """
     Assists in checking the version of a Python package based on the __version__ attribute
     """
@@ -9,6 +10,9 @@ class Version:
         :param package: the package object
         """
         self.components = package.__version__.split(".")
+
+    def __str__(self):
+        return ".".join(self.components)
 
     def is_at_least(self, *components: int):
         """

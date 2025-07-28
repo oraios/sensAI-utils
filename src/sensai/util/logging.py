@@ -1,12 +1,14 @@
 import atexit
+import inspect
 import logging as lg
+import os
 import sys
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 from io import StringIO
 from logging import *
-from typing import List, Callable, Optional, TypeVar, TYPE_CHECKING, Generic
+from typing import List, Callable, Optional, TypeVar, TYPE_CHECKING, Generic, Dict
 
 from .time import format_duration
 
@@ -68,18 +70,21 @@ def set_configure_callback(callback: Callable[[], None], append: bool = True) ->
 
 
 # noinspection PyShadowingBuiltins
-def configure(format=LOG_DEFAULT_FORMAT, level=lg.DEBUG):
+def configure(format=LOG_DEFAULT_FORMAT, level=lg.DEBUG, stream=sys.stdout):
     """
-    Configures logging to stdout with the given format and log level,
+    Configures logging to the given stream with the given format and log level,
     also configuring the default log levels of some overly verbose libraries as well as some pandas output options.
+
+    Note: the configuration can be extended by registering a callback via :func:`set_configure_callback`.
 
     :param format: the log format
     :param level: the minimum log level
+    :param stram: the output stream for whcih to configure a log handler
     """
     global _logFormat
     _logFormat = format
     remove_log_handlers()
-    basicConfig(level=level, format=format, stream=sys.stdout)
+    basicConfig(level=level, format=format, stream=stream)
     getLogger("matplotlib").setLevel(lg.INFO)
     getLogger("urllib3").setLevel(lg.INFO)
     getLogger("msal").setLevel(lg.INFO)
@@ -331,7 +336,10 @@ class LogTime:
             self.logger.info(f"{self.name} completed in {self.stopwatch.get_elapsed_time_string()}")
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.stop()
+        if exc_type is None:
+            self.stop()
+        elif self.stopwatch is not None and self.enabled:
+            self.logger.error(f"{self.name} failed after {self.stopwatch.get_elapsed_time_string()}")
 
     def __enter__(self):
         self.start()
@@ -431,3 +439,130 @@ class FallbackHandler(Handler):
         root_handlers = getLogger().handlers
         if len(root_handlers) == 0 or (len(root_handlers) == 1 and root_handlers[0] == self):
             self._handler.emit(record)
+
+
+class SuspendedLoggersContext:
+    """A context manager that provides an isolated logging environment.
+
+    Temporarily removes all existing loggers upon entry, providing a clean slate
+    for defining new loggers within the context. Upon exit, restores the original
+    logging configuration. This is useful when you need to temporarily configure
+    a completely isolated logging setup without interference from existing loggers.
+
+    The context manager:
+        - Removes all existing loggers on entry
+        - Allows defining new temporary loggers within the context
+        - Restores the original logging configuration on exit
+        - Preserves root logger settings for restoration
+
+    Example:
+        >>> with SuspendedLoggersContext():
+        ...     # No loggers are active here (configure your own)
+        ...     pass
+        >>> # All original loggers are restored here
+    """
+
+    def __init__(self):
+        self.saved_loggers: Dict[str, lg.Logger] = {}
+        self.saved_root_handlers: list = []
+        self.saved_root_level: Optional[int] = None
+
+    def __enter__(self) -> 'SuspendedLoggersContext':
+        # Save root logger state
+        root_logger = lg.getLogger()
+        self.saved_root_handlers = root_logger.handlers.copy()
+        self.saved_root_level = root_logger.level
+
+        # Save all existing loggers
+        self.saved_loggers = {
+            name: lg.getLogger(name)
+            for name in lg.root.manager.loggerDict
+        }
+
+        # Clear all loggers
+        lg.root.manager.loggerDict.clear()
+        root_logger.handlers.clear()
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        # Restore root logger state
+        root_logger = lg.getLogger()
+        root_logger.handlers = self.saved_root_handlers
+        if self.saved_root_level is not None:
+            root_logger.setLevel(self.saved_root_level)
+
+        # Restore all saved loggers
+        lg.root.manager.loggerDict.update(self.saved_loggers)
+
+
+class LogLevelsChangedContext:
+    """
+    A context manager that temporarily changes the log levels of given loggers.
+    """
+
+    def __init__(self, log_levels: Dict[str, int]):
+        """
+        :param log_levels: a mapping from logger name to desired log level
+        """
+        self.log_levels = log_levels
+        self.saved_log_levels: Dict[str, int] | None = None
+
+    def __enter__(self) -> None:
+        self.saved_log_levels = {}
+        for name, new_level in self.log_levels.items():
+            logger = lg.getLogger(name)
+            self.saved_log_levels[name] = logger.level
+            logger.setLevel(new_level)
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        for name, level in self.saved_log_levels.items():
+            lg.getLogger(name).setLevel(level)
+
+
+def loggers_in_hierarchy(logger_name: str) -> List[str]:
+    """
+    For a given logger name, returns all the loggers in its hierarchy, i.e. the logger itself
+    and all its ancestors
+
+    :param logger_name: the name of a logger (e.g. "a.b.c")
+    :return: the names of all loggers in the given loggers hierarchy (e.g. ["a", "a.b", "a.b.c"])
+    """
+    components = logger_name.split(".")
+    result = []
+    for i in range(len(components)):
+        result.append(".".join(components[:i+1]))
+    return result
+
+
+def format_log_message(logger: Logger, level: int, msg: str, formatter: Formatter, stacklevel: int = 1) -> str:
+    """
+    Formats a log message as it would have been created by `logger.log(level, msg)` with the given formatter
+
+    :param logger: the logger
+    :param level: the log level
+    :param msg: the message
+    :param formatter: the formatter
+    :param stacklevel: the stack level of the function to report as the generator
+    :return: the formatted log message (not including trailing newline)
+    """
+    frame_info = inspect.stack()[stacklevel]
+    pathname = frame_info.filename
+    lineno = frame_info.lineno
+    func = frame_info.function
+
+    record = logger.makeRecord(
+        name=logger.name,
+        level=level,
+        fn=pathname,
+        lno=lineno,
+        msg=msg,
+        args=(),
+        exc_info=None,
+        func=func,
+        extra=None,
+    )
+    record.created = time.time()
+    record.asctime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.created))
+
+    return formatter.format(record)
